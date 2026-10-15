@@ -2,7 +2,7 @@
 
 [Website](https://submilli.ai/) · [Documentation](https://submilli.ai/docs/) · [Quickstart](https://submilli.ai/docs/quickstart/)
 
-Execute agent-generated TypeScript in isolated WebAssembly, with runtime-enforced semantic permissions.
+A TypeScript runtime for code-mode agents, with WebAssembly isolation and runtime-enforced semantic permissions.
 
 You specify which operations an agent may perform, on which resources, and with which arguments. The runtime enforces those permissions.
 
