@@ -12,6 +12,6 @@ Packages expose typed APIs and declare the Capabilities available to an agent. [
 
 Connect your agent through MCP or HTTP.
 
-[Runtime](https://github.com/submilli/submilli-runtime) · [Contribute](https://github.com/submilli/submilli-runtime/blob/main/CONTRIBUTING.md) · [Discord](https://discord.gg/VphpukeGGj)
+[Runtime](https://github.com/submilli/submilli-runtime) · [Contribute](https://github.com/submilli/submilli-runtime/blob/main/CONTRIBUTING.md)
 
 Questions or feedback? Email [hello@submilli.ai](mailto:hello@submilli.ai).
