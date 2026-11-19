@@ -1,0 +1,184 @@
+# Reusable check: fails when a repository is missing its Big Brain pointer.
+#
+# Call it from .github/workflows/big-brain-pointer.yml in each repository:
+#
+#   name: Big Brain pointer
+#   on:
+#     pull_request:
+#     push:
+#       branches: [main]
+#   permissions:
+#     contents: read
+#   jobs:
+#     check:
+#       uses: submilli/.github/.github/workflows/big-brain-pointer.yml@main
+#
+# A repository passes when:
+#   - AGENTS.md has a <!-- big-brain-pointer:start --> ... <!-- big-brain-pointer:end -->
+#     block that links to github.com/submilli/company-context and names prepare_context.py.
+#   - A root CLAUDE.md or .claude/CLAUDE.md contains that block or imports AGENTS.md
+#     (a line @AGENTS.md in CLAUDE.md, or @../AGENTS.md in .claude/CLAUDE.md).
+# Excluded repositories (listed below by ID) pass only when they carry no pointer at all.
+# Setup guide: https://github.com/submilli/company-context/blob/main/docs/team-setup.md
+
+name: Big Brain pointer
+
+on:
+  workflow_call:
+    inputs:
+      path:
+        description: Directory to check, relative to the repository root. Leave the default except for tests.
+        type: string
+        required: false
+        default: "."
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Big Brain pointer
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check the pointer
+        env:
+          REPOSITORY: ${{ github.repository }}
+          REPOSITORY_ID: ${{ github.repository_id }}
+          CHECK_PATH: ${{ inputs.path }}
+        run: |
+          python3 -I - "$CHECK_PATH" <<'PY'
+          import os
+          import re
+          import sys
+
+          # Repositories that must never carry the pointer: client package repositories.
+          # Listed by GitHub repository ID, which survives renames and keeps private names out of this file.
+          EXCLUDED_REPOSITORY_IDS = {
+              "1445629934",
+          }
+
+          SETUP_DOC = "https://github.com/submilli/company-context/blob/main/docs/team-setup.md"
+          LINK = "github.com/submilli/company-context"
+          RESOLVER = "prepare_context.py"
+          START = re.compile(r"<!--\s*big-brain-pointer:start\s*-->")
+          END = re.compile(r"<!--\s*big-brain-pointer:end\s*-->")
+          ANY_MARKER = re.compile(r"big-brain(?:-pointer)?:(?:start|end)", re.IGNORECASE)
+          CLAUDE_FILES = {
+              "CLAUDE.md": ("AGENTS.md", "./AGENTS.md"),
+              ".claude/CLAUDE.md": ("../AGENTS.md",),
+          }
+
+          root = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1] else "."
+          repository = os.environ.get("REPOSITORY", "") or "(unknown repository)"
+          repository_id = os.environ.get("REPOSITORY_ID", "")
+          in_actions = os.environ.get("GITHUB_ACTIONS") == "true"
+
+
+          def read(rel):
+              path = os.path.join(root, rel)
+              if not os.path.isfile(path):
+                  return None
+              with open(path, encoding="utf-8", errors="replace") as handle:
+                  return handle.read()
+
+
+          def block_problems(text):
+              start = START.search(text)
+              if not start:
+                  return ["no <!-- big-brain-pointer:start --> marker"]
+              end = END.search(text, start.end())
+              if not end:
+                  return ["no <!-- big-brain-pointer:end --> marker after the start marker"]
+              block = text[start.end():end.start()]
+              problems = []
+              if LINK not in block.lower():
+                  problems.append("no link to https://" + LINK + " between the markers")
+              if RESOLVER not in block:
+                  problems.append("no " + RESOLVER + " resolver command between the markers")
+              return problems
+
+
+          def imports_agents(text, targets):
+              fenced = False
+              for line in text.splitlines():
+                  if line.lstrip().startswith(("```", "~~~")):
+                      fenced = not fenced
+                      continue
+                  if fenced:
+                      continue
+                  for target in targets:
+                      if re.search(r"(?:^|\s)@" + re.escape(target) + r"(?:\s|$)", line):
+                          return True
+              return False
+
+
+          def report(problems, fix, ok):
+              where = repository if root == "." else repository + " (" + root + ")"
+              if not problems:
+                  print("Big Brain pointer check passed for " + where + ": " + ok)
+                  return 0
+              print("Big Brain pointer check failed for " + where + ":")
+              for problem in problems:
+                  print("  - " + problem)
+                  if in_actions:
+                      print("::error title=Big Brain pointer::" + problem)
+              print(fix)
+              summary = os.environ.get("GITHUB_STEP_SUMMARY")
+              if in_actions and summary:
+                  with open(summary, "a", encoding="utf-8") as handle:
+                      handle.write("### Big Brain pointer check failed\n\n")
+                      handle.writelines("- " + problem.replace("<", "&lt;") + "\n" for problem in problems)
+                      handle.write("\n" + fix + "\n")
+              return 1
+
+
+          if not os.path.isdir(root):
+              sys.exit(report(["directory " + root + " not found"], "Check the path input.", ""))
+
+          if repository_id in EXCLUDED_REPOSITORY_IDS:
+              problems = []
+              for rel in ("AGENTS.md", "CLAUDE.md", ".claude/CLAUDE.md"):
+                  text = read(rel)
+                  if text is None:
+                      continue
+                  if ANY_MARKER.search(text):
+                      problems.append(rel + " has a Big Brain pointer marker")
+                  if "submilli/company-context" in text.lower():
+                      problems.append(rel + " mentions submilli/company-context")
+              sys.exit(report(
+                  problems,
+                  "This repository is on the exclusion list and must not carry the pointer. Remove it.",
+                  "excluded repository, no pointer found.",
+              ))
+
+          problems = []
+          agents = read("AGENTS.md")
+          if agents is None:
+              problems.append("AGENTS.md is missing at the repository root")
+          else:
+              problems.extend("AGENTS.md: " + problem for problem in block_problems(agents))
+
+          claude = [(rel, read(rel), targets) for rel, targets in CLAUDE_FILES.items()]
+          claude = [(rel, text, targets) for rel, text, targets in claude if text is not None]
+          if not claude:
+              problems.append("no CLAUDE.md or .claude/CLAUDE.md, so Claude Code may not load AGENTS.md")
+          elif not any(imports_agents(text, targets) or not block_problems(text) for rel, text, targets in claude):
+              names = " and ".join(rel for rel, text, targets in claude)
+              problems.append(
+                  names + " neither imports AGENTS.md (a line @AGENTS.md in CLAUDE.md, or @../AGENTS.md"
+                  " in .claude/CLAUDE.md) nor contains the pointer block"
+              )
+
+          sys.exit(report(
+              problems,
+              "Fix: copy the pointer block from " + SETUP_DOC + " into AGENTS.md,"
+              " and add a root CLAUDE.md containing the line @AGENTS.md.",
+              "AGENTS.md has the pointer and CLAUDE.md loads it.",
+          ))
+          PY
