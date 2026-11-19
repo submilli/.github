@@ -90,7 +90,6 @@ jobs:
               "1461594567",
               "1462354672",
               "1464692192",
-              "1313573320",  # TEMPORARY: proof run only, removed in the next commit
           }
           # Client package repositories must never carry the pointer, a Big Brain skill or a mention of it.
           CLIENT_REPOSITORY_IDS = {
