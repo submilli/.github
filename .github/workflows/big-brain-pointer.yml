@@ -1,4 +1,4 @@
-# Reusable check: fails when a repository is missing its Big Brain pointer.
+# Reusable check for the Big Brain pointer in Submilli repositories.
 #
 # Call it from .github/workflows/big-brain-pointer.yml in each repository:
 #
@@ -13,13 +13,23 @@
 #     check:
 #       uses: submilli/.github/.github/workflows/big-brain-pointer.yml@main
 #
-# A repository passes when:
-#   - AGENTS.md has a <!-- big-brain-pointer:start --> ... <!-- big-brain-pointer:end -->
-#     block that links to github.com/submilli/company-context and names prepare_context.py.
-#   - A root CLAUDE.md or .claude/CLAUDE.md contains that block or imports AGENTS.md
-#     (a line @AGENTS.md in CLAUDE.md, or @../AGENTS.md in .claude/CLAUDE.md).
-# Excluded repositories (listed below by ID) pass only when they carry no pointer at all.
-# Setup guide: https://github.com/submilli/company-context/blob/main/docs/team-setup.md
+# Order of checks:
+#   1. Owner. A repository not owned by submilli passes as skipped.
+#   2. Class, by repository ID. A repository on neither list below fails as unclassified.
+#   3. Internal repositories:
+#      M1. Root AGENTS.md has exactly one block from <!-- big-brain-pointer:start -->
+#          to <!-- big-brain-pointer:end -->, each marker on its own line.
+#      M2. The block's SHA-256 is in ACCEPTED_BLOCK_SHA256. The hash covers the start marker
+#          line through the end marker line, with CRLF changed to LF, trailing whitespace
+#          stripped from each line, lines joined with LF, and one final LF.
+#      M3. Root CLAUDE.md or .claude/CLAUDE.md imports AGENTS.md (@AGENTS.md in the root file,
+#          @../AGENTS.md in .claude/, as a standalone token outside code fences) or contains
+#          a block that passes M2.
+#      M4. No instruction file contains a <!-- big-brain:start --> local setup block.
+#   4. Client repositories:
+#      N1. No instruction file has a pointer marker or mentions submilli/company-context.
+#      N2. No big-brain or company-context entry exists under .agents/skills or .claude/skills.
+# Setup guide: https://github.com/submilli/company-context/blob/main/docs/team-setup.md#repository-pointer
 
 name: Big Brain pointer
 
@@ -50,33 +60,65 @@ jobs:
         env:
           REPOSITORY: ${{ github.repository }}
           REPOSITORY_ID: ${{ github.repository_id }}
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
           CHECK_PATH: ${{ inputs.path }}
         run: |
           python3 -I - "$CHECK_PATH" <<'PY'
+          import hashlib
           import os
           import re
           import sys
 
-          # Repositories that must never carry the pointer: client package repositories.
-          # Listed by GitHub repository ID, which survives renames and keeps private names out of this file.
-          EXCLUDED_REPOSITORY_IDS = {
+          # Repository classes, by GitHub repository ID. IDs survive renames and keep private names out of this file.
+          # Internal repositories must carry the pointer.
+          INTERNAL_REPOSITORY_IDS = {
+              "1217762486",
+              "1288052675",
+              "1363858971",
+              "1371145354",
+              "1390754145",
+              "1402998034",
+              "1416587071",
+              "1417272398",
+              "1419390737",
+              "1420668589",
+              "1424342108",
+              "1435876234",
+              "1441609012",
+              "1443993475",
+              "1459906216",
+              "1461594567",
+              "1462354672",
+              "1464692192",
+          }
+          # Client package repositories must never carry the pointer, a Big Brain skill or a mention of it.
+          CLIENT_REPOSITORY_IDS = {
               "1445629934",
           }
-
-          SETUP_DOC = "https://github.com/submilli/company-context/blob/main/docs/team-setup.md"
-          LINK = "github.com/submilli/company-context"
-          RESOLVER = "prepare_context.py"
-          START = re.compile(r"<!--\s*big-brain-pointer:start\s*-->")
-          END = re.compile(r"<!--\s*big-brain-pointer:end\s*-->")
-          ANY_MARKER = re.compile(r"big-brain(?:-pointer)?:(?:start|end)", re.IGNORECASE)
-          CLAUDE_FILES = {
-              "CLAUDE.md": ("AGENTS.md", "./AGENTS.md"),
-              ".claude/CLAUDE.md": ("../AGENTS.md",),
+          # Hashes of the accepted pointer block. To change the text: add the new hash,
+          # update the repositories, then remove the old hash.
+          ACCEPTED_BLOCK_SHA256 = {
+              "d86b7a7909a68e84ac4bd7aad50a52f8ed1ade3a53e93e69d71d69b0d6295048",
           }
+
+          SETUP_DOC = "https://github.com/submilli/company-context/blob/main/docs/team-setup.md#repository-pointer"
+          UNCLASSIFIED = (
+              "Unclassified repository. Classify it as internal or client before adding anything."
+              " A client or prospect repository must never get the pointer."
+          )
+          START = re.compile(r"^<!-- big-brain-pointer:start -->[ \t]*$", re.M)
+          END = re.compile(r"^<!-- big-brain-pointer:end -->[ \t]*$", re.M)
+          LOCAL_SETUP = re.compile(r"<!--\s*big-brain:start\s*-->")
+          ANY_MARKER = re.compile(r"big-brain(?:-pointer)?:(?:start|end)", re.IGNORECASE)
+          INSTRUCTION_FILES = ("AGENTS.md", "CLAUDE.md", ".claude/CLAUDE.md")
+          CLAUDE_IMPORTS = {"CLAUDE.md": "AGENTS.md", ".claude/CLAUDE.md": "../AGENTS.md"}
+          SKILL_DIRS = (".agents/skills", ".claude/skills")
+          FORBIDDEN_SKILLS = {"big-brain", "company-context"}
 
           root = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1] else "."
           repository = os.environ.get("REPOSITORY", "") or "(unknown repository)"
-          repository_id = os.environ.get("REPOSITORY_ID", "")
+          repository_id = os.environ.get("REPOSITORY_ID", "").strip()
+          owner = os.environ.get("REPOSITORY_OWNER", "").strip()
           in_actions = os.environ.get("GITHUB_ACTIONS") == "true"
 
 
@@ -84,38 +126,48 @@ jobs:
               path = os.path.join(root, rel)
               if not os.path.isfile(path):
                   return None
-              with open(path, encoding="utf-8", errors="replace") as handle:
-                  return handle.read()
+              with open(path, encoding="utf-8", errors="replace", newline="") as handle:
+                  return handle.read().replace("\r\n", "\n")
 
 
           def block_problems(text):
+              # M1 and M2 for one file.
+              starts = len(START.findall(text))
+              ends = len(END.findall(text))
+              if starts == 0:
+                  return ["no <!-- big-brain-pointer:start --> line"]
+              if starts > 1 or ends > 1:
+                  return ["more than one pointer block; keep exactly one"]
               start = START.search(text)
-              if not start:
-                  return ["no <!-- big-brain-pointer:start --> marker"]
               end = END.search(text, start.end())
               if not end:
-                  return ["no <!-- big-brain-pointer:end --> marker after the start marker"]
-              block = text[start.end():end.start()]
-              problems = []
-              if LINK not in block.lower():
-                  problems.append("no link to https://" + LINK + " between the markers")
-              if RESOLVER not in block:
-                  problems.append("no " + RESOLVER + " resolver command between the markers")
-              return problems
+                  return ["no <!-- big-brain-pointer:end --> line after the start marker"]
+              lines = text[start.start():end.end()].split("\n")
+              body = "\n".join(line.rstrip() for line in lines) + "\n"
+              digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+              if digest not in ACCEPTED_BLOCK_SHA256:
+                  return ["the pointer block differs from the canonical text (block hash " + digest[:12] + ")"]
+              return []
 
 
-          def imports_agents(text, targets):
+          def imports_agents(text, target):
+              # M3: a standalone @target token outside code fences.
+              token = re.compile(r"(?:^|\s)@" + re.escape(target) + r"(?:\s|$)")
               fenced = False
-              for line in text.splitlines():
+              for line in text.split("\n"):
                   if line.lstrip().startswith(("```", "~~~")):
                       fenced = not fenced
                       continue
-                  if fenced:
-                      continue
-                  for target in targets:
-                      if re.search(r"(?:^|\s)@" + re.escape(target) + r"(?:\s|$)", line):
-                          return True
+                  if not fenced and token.search(line):
+                      return True
               return False
+
+
+          def summarize(lines):
+              summary = os.environ.get("GITHUB_STEP_SUMMARY")
+              if in_actions and summary:
+                  with open(summary, "a", encoding="utf-8") as handle:
+                      handle.write("\n".join(lines).replace("<", "&lt;") + "\n")
 
 
           def report(problems, fix, ok):
@@ -129,21 +181,20 @@ jobs:
                   if in_actions:
                       print("::error title=Big Brain pointer::" + problem)
               print(fix)
-              summary = os.environ.get("GITHUB_STEP_SUMMARY")
-              if in_actions and summary:
-                  with open(summary, "a", encoding="utf-8") as handle:
-                      handle.write("### Big Brain pointer check failed\n\n")
-                      handle.writelines("- " + problem.replace("<", "&lt;") + "\n" for problem in problems)
-                      handle.write("\n" + fix + "\n")
+              summarize(["### Big Brain pointer check failed", ""] + ["- " + p for p in problems] + ["", fix])
               return 1
 
+
+          if owner.lower() != "submilli":
+              print("not a Submilli repository, skipped")
+              sys.exit(0)
 
           if not os.path.isdir(root):
               sys.exit(report(["directory " + root + " not found"], "Check the path input.", ""))
 
-          if repository_id in EXCLUDED_REPOSITORY_IDS:
+          if repository_id in CLIENT_REPOSITORY_IDS:
               problems = []
-              for rel in ("AGENTS.md", "CLAUDE.md", ".claude/CLAUDE.md"):
+              for rel in INSTRUCTION_FILES:
                   text = read(rel)
                   if text is None:
                       continue
@@ -151,11 +202,29 @@ jobs:
                       problems.append(rel + " has a Big Brain pointer marker")
                   if "submilli/company-context" in text.lower():
                       problems.append(rel + " mentions submilli/company-context")
+              for base in SKILL_DIRS:
+                  top = os.path.join(root, base)
+                  if not os.path.isdir(top):
+                      continue
+                  for current, dirs, files in os.walk(top):
+                      for name in sorted(dirs + files):
+                          if name in FORBIDDEN_SKILLS:
+                              rel = os.path.relpath(os.path.join(current, name), root)
+                              problems.append(rel + " is a Big Brain skill and must not exist here")
               sys.exit(report(
                   problems,
-                  "This repository is on the exclusion list and must not carry the pointer. Remove it.",
-                  "excluded repository, no pointer found.",
+                  "This is a client repository. It must never carry the pointer, a Big Brain skill"
+                  " or a mention of Big Brain. Remove them. See " + SETUP_DOC + ".",
+                  "client repository, no pointer found.",
               ))
+
+          if repository_id not in INTERNAL_REPOSITORY_IDS:
+              if in_actions:
+                  print("::error title=Big Brain pointer::" + UNCLASSIFIED)
+              else:
+                  print(UNCLASSIFIED)
+              summarize([UNCLASSIFIED])
+              sys.exit(1)
 
           problems = []
           agents = read("AGENTS.md")
@@ -164,21 +233,29 @@ jobs:
           else:
               problems.extend("AGENTS.md: " + problem for problem in block_problems(agents))
 
-          claude = [(rel, read(rel), targets) for rel, targets in CLAUDE_FILES.items()]
-          claude = [(rel, text, targets) for rel, text, targets in claude if text is not None]
+          claude = [(rel, read(rel)) for rel in CLAUDE_IMPORTS]
+          claude = [(rel, text) for rel, text in claude if text is not None]
           if not claude:
               problems.append("no CLAUDE.md or .claude/CLAUDE.md, so Claude Code may not load AGENTS.md")
-          elif not any(imports_agents(text, targets) or not block_problems(text) for rel, text, targets in claude):
-              names = " and ".join(rel for rel, text, targets in claude)
+          elif not any(imports_agents(text, CLAUDE_IMPORTS[rel]) or not block_problems(text) for rel, text in claude):
+              names = " and ".join(rel for rel, text in claude)
               problems.append(
                   names + " neither imports AGENTS.md (a line @AGENTS.md in CLAUDE.md, or @../AGENTS.md"
-                  " in .claude/CLAUDE.md) nor contains the pointer block"
+                  " in .claude/CLAUDE.md) nor contains an accepted pointer block"
               )
+
+          for rel in INSTRUCTION_FILES:
+              text = read(rel)
+              if text is not None and LOCAL_SETUP.search(text):
+                  problems.append(
+                      rel + " has a committed local setup block (<!-- big-brain:start -->);"
+                      " it holds one person's paths, so remove it"
+                  )
 
           sys.exit(report(
               problems,
-              "Fix: copy the pointer block from " + SETUP_DOC + " into AGENTS.md,"
+              "Fix: copy the pointer block unchanged from " + SETUP_DOC + " into AGENTS.md,"
               " and add a root CLAUDE.md containing the line @AGENTS.md.",
-              "AGENTS.md has the pointer and CLAUDE.md loads it.",
+              "AGENTS.md has the canonical pointer and CLAUDE.md loads it.",
           ))
           PY
